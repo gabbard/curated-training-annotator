@@ -3,7 +3,6 @@ package edu.isi.vista.annotationutils
 import com.fasterxml.jackson.databind.JsonNode
 import com.fasterxml.jackson.databind.ObjectMapper
 import edu.isi.nlp.parameters.serifstyle.SerifStyleParameterFileLoader
-import org.apache.jena.atlas.lib.tuple.Tuple
 import java.io.File
 import java.text.SimpleDateFormat
 import java.util.*
@@ -126,12 +125,12 @@ class ParseEventLogs {
     }
 }
 
-typealias IndicatorMap = Map<String, List<Map<String, String>>>
+typealias IndicatorMap = Map<String, Map<String, List<Map<String, String>>>>
 
 data class ProjectInfo(
         val username: String,
         val eventType: String,
-        // indicators = { indicator: [{docID, spanBegin, spanEnd}, ...], ... }
+        // indicators = {indicator: {docID: [{text, spanBegin, spanEnd}, ...], ...}
         var indicators: IndicatorMap,
         var annotationTime: Long
 ) {
@@ -146,12 +145,11 @@ private fun optionalLogValToString(logVal: JsonNode?): String? {
     return logVal.toString()?.removeSurrounding("\"")
 }
 
-private fun createSpanTriple(
-        event: JsonNode, docID: String
-): Map<String, String> {
+private fun createSpanMap(event: JsonNode): Map<String, String> {
+    val spanText = logValToString(event["details"]["text"])
     val spanBegin = logValToString(event["details"]["begin"])
     val spanEnd = logValToString(event["details"]["end"])
-    return mapOf("doc_id" to docID, "begin" to spanBegin, "end" to spanEnd)
+    return mapOf("text" to spanText, "begin" to spanBegin, "end" to spanEnd)
 }
 
 fun secondsToHMS(seconds: Long): String {
@@ -210,7 +208,9 @@ private fun parseProjectEvents(
     var documentTimeElapsed: Long = 0
     val documentTimeMap = mutableMapOf<String, Long>().withDefault { 0 }
     var currentIndicator: String? = null
-    val indicatorMap = mutableMapOf<String, MutableList<Map<String, String>>>()
+    val indicatorMap = mutableMapOf<
+            String, MutableMap<String, MutableList<Map<String, String>>>
+            >()
     for (event in logEvents) {
         val inceptionEventType = event.get("event").toString().removeSurrounding("\"")
         val documentName = event.get("document_name")?.toString()?.removeSurrounding("\"")
@@ -218,9 +218,9 @@ private fun parseProjectEvents(
         // If the event is an indicator search, record the search query.
         // Search query events aren't associated with any particular document.
         if (inceptionEventType == "ExternalSearchQueryEvent" && user == username) {
-            currentIndicator = logValToString(event["details"]["query"])
+            currentIndicator = logValToString(event["details"]["query"]).toLowerCase()
             if (!indicatorMap.containsKey(currentIndicator)) {
-                indicatorMap[currentIndicator] = mutableListOf()
+                indicatorMap[currentIndicator] = mutableMapOf()
             }
         }
         // When getting times and spans, only deal with events that have a
@@ -228,11 +228,18 @@ private fun parseProjectEvents(
         // (admin monitoring activity also gets recorded)
         if (documentName != null && user == username) {
             if (inceptionEventType == "SpanCreatedEvent") {
-                val spanTriple = createSpanTriple(event, documentName)
-                indicatorMap[currentIndicator]?.add(spanTriple)
+                val spanTriple = createSpanMap(event)
+                if (indicatorMap[currentIndicator]?.get(documentName) != null) {
+                    indicatorMap[currentIndicator]
+                            ?.get(documentName)?.add(spanTriple)
+                } else {
+                    indicatorMap[currentIndicator]
+                            ?.set(documentName, mutableListOf(spanTriple))
+                }
             } else if (inceptionEventType == "SpanDeletedEvent") {
-                val spanTriple = createSpanTriple(event, documentName)
-                indicatorMap[currentIndicator]?.remove(spanTriple)
+                val spanTriple = createSpanMap(event)
+                indicatorMap[currentIndicator]
+                        ?.get(documentName)?.remove(spanTriple)
             }
             // Timestamps are in Unix time (milliseconds)
             val timestamp = event.get("created").toString().toLong()
